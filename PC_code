@@ -1,0 +1,689 @@
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <cmath>
+#include <cstdlib>
+#include <queue>
+
+#include "cv.h"
+#include "highgui.h"
+#include "windows.h"
+using namespace cv;
+//using namespace std;
+
+
+int cnt = 0;//鼠标点击的次数
+int count = 0;
+//基本图像类{
+template<class T>
+class Image {
+public:
+    IplImage* imgp;
+    Image(IplImage* img=0) :imgp(img) {}
+    ~Image()
+        {imgp=0; }
+
+    inline T* operator[] (const int rowIndx)
+        {return ((T *)(imgp->imageData + rowIndx*imgp -> widthStep)); }
+};
+typedef struct{
+unsigned char b,g,r;
+} RgbPixel;
+typedef Image<RgbPixel> RgbImage;
+typedef Image<unsigned char> BwImage;
+//基本图像类}
+
+void mouse0(int mouseevent, int x, int y, int flags, void* param);
+void mouse1(int mouseevent, int x, int y, int flags, void* param);
+void goAhead();
+void turnLeft();
+void turnRight();
+void goBack();
+void stop();
+void adjust(double headX, double headY, double tailX, double tailY, double destX, double destY);
+void solveMaze(std::ofstream& fout);//fout输出二值化后的迷宫（0/1）
+void cvThin (IplImage* src, IplImage* dst, int iterations);
+
+
+int firstX, firstY, width, height;
+int firstX1, firstY1, width1 , height1;
+
+int thintimes = 80;
+HANDLE hand1;
+DWORD bytewrite=10;
+BYTE bTemp[1];
+int color0=0,color1 = 116;//保存滑块的数值
+//************************************************************
+double headX, headY, tailX, tailY;
+int mycount = 50;
+CvPoint2D32f corners[50];
+bool visited[50];
+int lastInstruction = 0;
+int RGB = 70;
+int times = 15;
+int lastPoint = -1;
+int firstPoint = -1;
+int lastPointX=0, lastPointY=0;
+int nextPoint = -1;
+int maxX = 0, maxY = 0;
+int cross, direction = 0,cornertime = 0;
+double angle;
+std::queue<int> que;
+double getDistance(CvPoint2D32f x, CvPoint2D32f y)
+    {return sqrt(pow(x.x-y.x,2) + pow(x.y-y.y,2));}
+double calculateAngle(CvPoint2D32f roadPointd, CvPoint2D32f roadPointf);
+void getTrack();
+void adjust(int cross);
+	std::ofstream fpath("path.out");
+
+double px[4],py[4];//记录第一次取点以及变形后图形的大小------（左上 右上 左下 右下）
+CvPoint2D32f originpoints[4]; //保存原始坐标
+CvPoint2D32f newpoints[4]; //保存新坐标
+CvMat*  transmat = cvCreateMat(3, 3, CV_32FC1);//保存变换数据
+IplImage* transimg3=cvCreateImage(cvSize(500,500), IPL_DEPTH_8U, 3);//保存变换结果
+IplImage* transimg4=cvCreateImage(cvSize(500,500), IPL_DEPTH_8U, 3);//保存zhuizongtuxiang
+ CvCapture* capture = 0;//视频流捕获	
+CvMemStorage* storage = cvCreateMemStorage(); //创建一片内存区域存储线段数据
+    
+IplImage* img1 = cvCreateImage(cvGetSize(transimg3), 8, 1); //新建一幅同样大的图像，用于画出找到的直线段
+
+IplImage * img2=cvCreateImage(cvSize(500,500), IPL_DEPTH_8U,1);//二值图
+IplImage *g_pGrayImage = NULL;//灰度图
+IplImage *g_pGrayImage1 = NULL;//灰度图
+IplImage* tmp1 = cvCreateImage(cvSize(500,500),IPL_DEPTH_32F,1);//corners
+IplImage* tmp2 = cvCreateImage(cvSize(500,500),IPL_DEPTH_32F,1);
+IplImage *TrackImage=cvCreateImage(cvSize(400,400),IPL_DEPTH_8U,3);
+IplImage *img, *destimage1;//solveMaze
+IplImage* finalimage;
+IplImage* finalnalimage1;
+
+void on_trackbar(int pos ,int poo,IplImage* camera,IplImage* camera1)  
+{  
+    // 转为二值图  
+    cvThreshold(camera, camera1,100, 255, CV_THRESH_BINARY);  
+}  
+void trackbar0(int value)
+{
+	value=cvGetTrackbarPos("0","win2");
+}
+void trackbar1(int value)
+{
+	value=cvGetTrackbarPos("1","win2");
+}
+int main()
+{
+	try{
+	    
+    //串口初始化{
+	std::cout<< "打开串口..." <<std:: endl;
+	wchar_t *a = L"COM5";
+	hand1 = CreateFile(a, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+	if(hand1 == (HANDLE) - 1) std::cout << "打开串口失败" << std::endl;
+	else std::cout << "打开串口成功！" <<std:: endl;
+	DCB dcb;                 
+	GetCommState(hand1, &dcb);
+	dcb.BaudRate = 9600;
+	dcb.ByteSize = 8;
+	dcb.Parity = NOPARITY;
+	dcb.StopBits = 1;
+	SetCommState(hand1, &dcb);
+	//串口初始化}
+
+	//goAhead();
+		CvPoint trace[100], carHead, carTail;
+    int n;
+	std::ofstream fout("maze.out");
+	std::ofstream fcor("corner.out");
+
+    cvNamedWindow("win1");
+	cvNamedWindow("win5");
+	cvNamedWindow("win10");
+	cvSetMouseCallback("win1", mouse0);//设置回调函数
+
+	
+    CvCapture* capture = 0;//视频流捕获	
+	capture = cvCaptureFromCAM(-1);//从摄像头获得视频流（当值定位0时利用内置摄像头则正常）
+	int width = cvGetCaptureProperty(capture, CV_CAP_PROP_FRAME_WIDTH);
+	cvSetCaptureProperty(capture , CV_CAP_PROP_FRAME_WIDTH, width*2);
+	if(!capture)		return -1;	
+	IplImage *video = cvCreateImage(cvSize(500, 500), IPL_DEPTH_8U, 3);
+
+	IplImage* finalnalimage = cvCreateImage(cvGetSize(img2), IPL_DEPTH_8U, 1);
+    IplImage* img3 = cvCreateImage(cvGetSize(img2), IPL_DEPTH_8U, 1);
+	//cvNamedWindow("从摄像头读取视频", 0);	
+  
+    CvRect trackerG = cvRect(firstX =0 , firstY=0, width = 500, height = 500);
+	CvRect trackerG1 = cvRect(firstX1=0, firstY1=0, width1 = 500, height1 = 500);
+
+
+    IplImage* camera; 
+    IplImage* hsvCamG;
+    IplImage* hueCamG;
+    IplImage* destiG;
+    IplImage* hsvCamR;
+    IplImage* hueCamR;
+    IplImage* destiR;
+    IplImage* cameradG;
+    IplImage* cameradR;
+	IplImage* hsvCamG1;
+    IplImage* hueCamG1;
+    IplImage* destiG1;
+    IplImage* hsvCamR1;
+    IplImage* hueCamR1;
+    IplImage* destiR1;
+    IplImage* cameradG1;
+    
+	cameradG = cvCreateImage(cvGetSize(video), 8, 1);
+	cameradG1 = cvCreateImage(cvGetSize(video), 8, 1);
+
+	while (cnt != -1)
+	{
+		video = cvQueryFrame(capture); //获取一帧图像
+		cvShowImage("win1", video);
+        cvWaitKey(1);
+
+
+
+
+		if(cnt==4){
+            newpoints[0]=cvPoint2D32f(0,0);
+		    newpoints[1]=cvPoint2D32f(500,0);
+		    newpoints[2]=cvPoint2D32f(0,500);
+			newpoints[3]=cvPoint2D32f(500,500);
+			solveMaze(fout);//输出（0/1）迷宫，即maze.out
+    
+           //追踪目标trackerG，trackerR{
+            RgbImage maze(video);
+            cvShowImage("win1", video);
+			cvNamedWindow("win2"); //显示处理后图像
+            cvCreateTrackbar("rgb_0","win2",&color0,255,trackbar0);
+	        cvCreateTrackbar("rgb_1","win2",&color1,255,trackbar1);
+			cnt = -1;
+			cvGetPerspectiveTransform(originpoints, newpoints, transmat); //根据四个点计算变换矩阵
+			cvWarpPerspective(video, transimg3, transmat);//根据变换矩阵计算图像的变换
+			cvShowImage("win2", transimg3);
+			cvSetMouseCallback("win2", mouse1);
+			
+			fout.close();
+			std::cout << "step1" <<std:: endl;
+		}
+	}
+	std::cout <<"go"<<std::endl;
+    //*****************************************
+	for(int i=0;i<50;i++) //初始化数组
+		{
+			corners[i].x=0;
+			corners[i].y=0;
+		}
+	
+    cvGoodFeaturesToTrack(finalnalimage1, tmp1, tmp2, corners, &mycount, 0.05, 60);//寻找角点
+    //cvMerge(finalimage,finalimage,finalimage,0,TrackImage);
+	
+    for(int i = 0; i < mycount; ++i)
+    {
+        visited[i] = false;
+        //cvRectangle(transimg3, cvPoint(corners[i].x,corners[i].y),
+          //  cvPoint(corners[i].x+10, corners[i].y+10),CV_RGB(255,0,0), 1, CV_AA,0);
+		//if(corners[i].x<490 && corners[i].x>10 && corners[i].y>10 && corners[i].y<490){
+        cvCircle(finalimage, cvPoint((int)(corners[i].x), (int)(corners[i].y)), 6, CV_RGB(255,0,0),2);
+
+             // }
+    }
+    cvReleaseImage(&tmp1); cvReleaseImage(&tmp2); 
+	
+    for(int i=0;i<50;i++) 
+		{
+			if(corners[i].x<10 || corners[i].x>490 || corners[i].y<10 || corners[i].y>490)  
+			{ corners[i].x=0; corners[i].y=0; }
+			if (corners[i].x==0 && corners[i].y==0) {
+                visited[i] = true;
+                //std::cout<<int(corners[i].x)<<' '<<int(corners[i].y)<<std::endl;
+            }
+			else{
+			fcor << corners[i].x << ' ' << corners[i].y << std::endl;
+		    std::cout<<int(corners[i].x)<<' '<<int(corners[i].y)<<std::endl;
+			}
+		}
+	std::cout <<"go"<<std::endl;
+	int nothing,number = 0;
+				//int a; std::cin>>a;
+
+    
+//---------二值化------------------------
+    /*while(cvWaitKey(1)!='p')
+	{
+		video = cvQueryFrame(capture); //获取一帧图像
+		cvWarpPerspective(video,transimg4 ,transmat);//根据变换矩阵计算图像的变换
+		std::cout <<"go"<<std::endl;
+        
+		//g_pGrayImage =  cvCreateImage(cvGetSize(transimg3), IPL_DEPTH_8U, 1); 
+		 //cvCvtColor(transimg3, g_pGrayImage, CV_BGR2GRAY); 
+		//on_trackbar(color0,color1,g_pGrayImage,img2);  //二值化
+
+		cvInRangeS(transimg4,cvScalar(color0,color0,color0), cvScalar(color1,color1,color1), img3);
+
+		cvThin(img3, finalnalimage,50);
+		cvNamedWindow("win4");
+		std::cout <<"go"<<std::endl;
+		cvShowImage("win2", img3); //显示变换后的二值图像
+        cvShowImage("win3",transimg4);//显示透视示变换后的图像
+		cvShowImage("win4",finalnalimage );
+		if(cnt >= 4)  break;
+	}
+    */
+    cvNamedWindow("win4"); 
+    while(true)
+	{
+        video = cvQueryFrame(capture); //获取一帧图像
+		cvWarpPerspective(video,transimg4 ,transmat);//根据变换矩阵计算图像的变换
+		cvShowImage("win3",transimg4);//显示透视示变换后的图像
+		cvInRangeS(transimg4,CV_RGB(35,90,35), CV_RGB(85,160,85), cameradG);
+		cvInRangeS(transimg4,CV_RGB(100, 30, 30), CV_RGB(200, 70, 70), cameradG1);
+		if(number < 1)
+		{
+			std::cin >> nothing;
+            ++number;
+		}
+        if(number > 0)  ++number;
+        /*if(number >=1 && number <= 5 )
+		{
+			trackerG1 = cvRect(firstX1 = 0, firstY1 = 0, width1 = 100, height1 = 500);
+            trackerG = cvRect(firstX = 0, firstY = 0, width = 100, height = 500);
+			++number;
+		}
+        if(number >45 && number <= 60 )
+		{
+			trackerG1 = cvRect(firstX1 = 0, firstY1 = 0, width1 = 500, height1 = 200);
+            trackerG = cvRect(firstX = 0, firstY = 0, width = 500, height = 200);
+			++number;
+		}
+        if(number >60 && number <= 120 )
+		{
+			trackerG1 = cvRect(firstX1 = 300, firstY1 = 0, width1 = 200, height1 = 350);
+            trackerG = cvRect(firstX = 300, firstY = 0, width = 200, height = 350);
+			++number;
+		}*/
+       	IplImage* cap1 = cvLoadImage("D:\\red.jpg"); //目标图像
+        IplImage* caphsv1 = cvCreateImage(cvGetSize(cap1),  8, 3); //HSV空间的目标图像
+        IplImage* caphue1 = cvCreateImage(cvGetSize(cap1),  8, 1); //目标的色度通道
+        cvCvtColor(cap1, caphsv1, CV_BGR2HSV); //目标从RGB空间转换至HSV空间
+        cvSplit(caphsv1, caphue1, NULL, NULL, NULL); //只提取目标的色度通道
+        int bins1 = 30; //指定直方图的精细程度（横轴等分为多少区间）
+        float range1[] = {0, 180}; //指定直方图横轴的取值范围，色度通道最大值就是180
+        float* ranges1[] = {range1}; //因为cvCreateHist的参数必须是float**
+        CvHistogram* hist1 = cvCreateHist(1, &bins1, CV_HIST_ARRAY, ranges1); //创建直方图
+        cvCalcHist(&caphue1, hist1); //计算目标的色度通道的直方图
+//-------------------目标追踪---------------------------  
+		hsvCamG1 = cvCreateImage(cvGetSize(transimg4), 8, 3);
+        hueCamG1 = cvCreateImage(cvGetSize(transimg4), 8, 1);
+        destiG1 = cvCreateImage(cvGetSize(transimg4), 8, 1);
+        cvCvtColor(transimg4, hsvCamG1, CV_BGR2HSV);
+        cvSplit(hsvCamG1, hueCamG1, NULL, NULL, NULL);
+        cvCalcBackProject(&hueCamG1, destiG1, hist1);
+		cvAnd(destiG1, cameradG1, destiG1);
+		//cvErode(destiG1,destiG1);
+        cvShowImage("win10",destiG1);
+        CvConnectedComp compG1;
+        cvCamShift(destiG1, trackerG1, cvTermCriteria(3, 10, 1), &compG1);
+        trackerG1 = compG1.rect;                                                                         //追踪目标矩形区域
+        tailX = compG1.rect.x + compG1.rect.width / 2,  tailY = compG1.rect.y + compG1.rect.height / 2;     //追踪目标中心
+		std::cout << tailX << "   bb   "<<tailY<<"           ";
+		fpath << "   red   ("<< tailX << " , "<<tailY<<")           ";
+		
+
+
+
+		
+//--------------------追踪目标确定------------------
+		IplImage* cap = cvLoadImage("D:\\grr.jpg"); //目标图像
+        IplImage* caphsv = cvCreateImage(cvGetSize(cap), 8, 3); //HSV空间的目标图像
+        IplImage* caphue = cvCreateImage(cvGetSize(cap),8, 1); //目标的色度通道
+        cvCvtColor(cap, caphsv, CV_BGR2HSV); //目标从RGB空间转换至HSV空间
+        cvSplit(caphsv, caphue, NULL, NULL, NULL); //只提取目标的色度通道
+        int bins = 30; //指定直方图的精细程度（横轴等分为多少区间）
+        float range[] = {0, 180}; //指定直方图横轴的取值范围，色度通道最大值就是180
+        float* ranges[] = {range}; //因为cvCreateHist的参数必须是float**
+        CvHistogram* hist = cvCreateHist(1, &bins, CV_HIST_ARRAY, ranges); //创建直方图
+        cvCalcHist(&caphue, hist); //计算目标的色度通道的直方图
+
+//-------------------目标追踪---------------------------  
+		hsvCamG = cvCreateImage(cvGetSize(transimg4), 8, 3);
+        hueCamG = cvCreateImage(cvGetSize(transimg4), 8, 1);
+        destiG = cvCreateImage(cvGetSize(transimg4), 8, 1);
+        cvCvtColor(transimg4, hsvCamG, CV_BGR2HSV);
+        cvSplit(hsvCamG, hueCamG, NULL, NULL, NULL);
+        cvCalcBackProject(&hueCamG, destiG, hist);
+        cvAnd(destiG, cameradG, destiG);
+		//cvErode(destiG,destiG);
+        cvShowImage("win5",destiG);
+        CvConnectedComp compG;
+        cvCamShift(destiG, trackerG, cvTermCriteria(3, 10, 1), &compG);
+        trackerG = compG.rect;                                                                         //追踪目标矩形区域
+        headX = compG.rect.x + compG.rect.width / 2,  headY = compG.rect.y + compG.rect.height / 2;     //追踪目标中心
+		std::cout << headX << "   yy   "<<headY<<"           ";
+		fpath << "   green   ("<< headX << " , "<<headY<<")           ";
+
+
+        
+
+        //if(tailX < 0 && tailY < 0)    
+		trackerG1 = cvRect(firstX1 = 0, firstY1 = 0, width1 = 500, height1 = 500);
+        //if(headX < 0 && headY < 0)    
+		trackerG = cvRect(firstX = 0, firstY = 0, width = 500, height = 500);
+
+
+		//cvWaitKey(1);
+		
+        if(number > 10)
+		getTrack(); }
+		fcor.close();
+		fpath.close();
+    return 0;
+    } catch(...){
+        return 0;
+	}
+	}
+
+void getTrack()
+{
+    CvPoint2D32f centre = cvPoint2D32f((headX+tailX)/2, (headY+tailY)/2);
+	//CvPoint2D32f tail = cvPoint2D32f(tailX, tailY);
+	fpath<<"centre   ("<<centre.x<<" , "<<centre.y<<")    ";
+	
+    if(lastPoint == -1)//找到离车最近的点为起点
+    {
+        for (int i = 0; i < mycount; ++i)
+        {
+            if(lastPoint == -1)
+            {
+                lastPoint = i;
+                lastPointX = corners[i].x;
+                lastPointY = corners[i].y;
+            }
+            else if(getDistance(centre, corners[i]) < getDistance(centre, corners[lastPoint]))
+			//if(getDistance(centre, corners[i]) < 50)
+            {
+                lastPoint = i;
+                lastPointX = corners[i].x;
+                lastPointY = corners[i].y;
+            }
+        }
+		firstPoint = lastPoint;
+		std::cout << "firstpoint(" << lastPointX << "," << lastPointY << ")" << std::endl;
+		fpath << "firstpoint(" << lastPointX << "," << lastPointY << ")" << std::endl;
+        visited[lastPoint] = true;
+        return;
+    }
+	
+	if (nextPoint == -1) nextPoint = lastPoint;fpath<<"direction"<<direction<<"		";
+	//if ((direction == 0 && abs(centre.y - corners[nextPoint].y) < 60) || 
+	//	(direction == 1 && abs(centre.x - corners[nextPoint].x) < 60))
+    if ((getDistance(centre, corners[nextPoint]) < 90) 
+		|| ((cornertime > 1) && (direction == 0 && abs(centre.y - corners[nextPoint].y) < 135) || 
+		(direction == 1 && abs(centre.x - corners[nextPoint].x) < 135)))
+    {
+		while (!que.empty()) que.pop();fpath<<cornertime<< ' ';
+		visited[nextPoint] = true;stop();++cornertime;
+		lastPoint = nextPoint;
+		lastPointX = corners[nextPoint].x;
+		lastPointY = corners[nextPoint].y;
+		std::cout<<"到达nextPoint"<<lastPointX<<","<<lastPointY<<std::endl;
+		fpath<<"到达nextPoint"<<lastPointX<<","<<lastPointY<<std::endl;
+		maxX = 0; maxY = 0;
+		for (int i = 0; i < mycount; ++i)//遍历点找nextPiont
+		{
+			if (visited[i]) continue;//已访问
+			if (getDistance(centre, corners[i]) < 50)//就在小车附近
+			{
+				visited[i] = true;
+				std::cout<<"就在小车附近("<<corners[i].x<<","<<corners[i].y<<std::endl;
+				fpath<<"就在小车附近("<<corners[i].x<<","<<corners[i].y<<std::endl;
+				continue;
+			}
+			if (abs(corners[i].x - lastPointX) < 35 && (!visited[i]))//同一列的最远点
+			{
+				visited[i] = true;
+				
+				std::cout<<"同一列("<<corners[i].x<<","<<corners[i].y<<std::endl;
+				fpath<<"同一列("<<corners[i].x<<","<<corners[i].y<<std::endl;
+				while (!que.empty())
+				{
+					visited[que.front()] = false;
+					std::cout<<"同一行false("<<corners[i].x<<","<<corners[i].y<<std::endl;
+					fpath<<"同一行false("<<corners[i].x<<","<<corners[i].y<<std::endl;
+					que.pop();
+				}
+				if (abs(corners[i].y - lastPointY) > maxY)
+				{
+					nextPoint = i;
+					maxY = abs(corners[i].y - lastPointY);
+				}
+				direction = 0;
+				//corners[nextPoint].x = lastPointX;
+			}
+	        if (maxY == 0 && abs(corners[i].y - lastPointY) < 35)//无同列点的情况下，同一行的最远点
+		    {
+				visited[i] = true;
+				
+				std::cout<<"同一行("<<corners[i].x<<","<<corners[i].y<<std::endl;
+				fpath<<"同一行("<<corners[i].x<<","<<corners[i].y<<std::endl;
+				que.push(i);
+		        if (abs(corners[i].x - lastPointX) > maxX)
+		        {
+					nextPoint = i;
+					maxX = abs(corners[i].x - lastPointX);
+				}
+				direction = 1;
+				//corners[nextPoint].y = lastPointY;
+		    }
+		}
+		//if (nextPoint != lastPoint) visited[nextPoint] = false;
+	}
+
+	std::cout<<"lastPoint("<<lastPointX<<","<<lastPointY<<std::endl;
+	fpath<<"lastPoint("<<lastPointX<<","<<lastPointY<<std::endl;
+	std::cout<<"nextPoint("<<corners[nextPoint].x<<","<<corners[nextPoint].y<<std::endl;
+	fpath<<"nextPoint("<<corners[nextPoint].x<<","<<corners[nextPoint].y<<std::endl;
+	
+	//找不到符合的i
+	if(nextPoint == lastPoint && nextPoint !=firstPoint ) {stop(); 
+						std::cout << "arrive!" << std::endl;
+	fpath << "arrive!" << std::endl;
+	}
+    else//走
+    {
+		cross = int(calculateAngle(corners[nextPoint], corners[lastPoint]));
+		//cos=a*b/[|a|*|b|]=(x1x2+y1y2)/[√[x1^2+y1^2]*√[x2^2+y2^2]]
+		/*double x1 = headX-tailX,
+			x2 = corners[nextPoint].x - corners[lastPoint].x,
+			y1 = headY-tailY,
+			y2 = corners[nextPoint].y - corners[lastPoint].y;
+		angle = (x1 * x2 + y1 * y2) /
+			(sqrt(pow(double(x1),2)+pow(double(y1),2)) * 
+			sqrt(pow(double(x2),2)+pow(double(y2),2)));
+		cross = int(acos(angle) * 180 / 3.14);*/
+		std::cout<<"cross:"<<cross<<std::endl;
+		fpath<<"cross:"<<cross<<std::endl;
+        CvPoint2D32f head,tail;
+        head.x=headX;
+        head.y=headY;
+        tail.x=tailX;
+        tail.y=tailY;
+        //if(getDistance(corners[lastPoint], head) > getDistance(corners[lastPoint],tail))visited[lastPoint] = true;
+		//if(getDistance(corners[lastPoint], centre) < 50) visited[lastPoint] = true;
+        //lastPoint = nextPoint;
+        adjust(cross);
+    }
+}
+
+double calculateAngle(CvPoint2D32f roadPointd, CvPoint2D32f roadPointf)
+{
+    CvPoint carVector=cvPoint(headX-tailX,headY-tailY),
+        roadVector=cvPoint(roadPointd.x-roadPointf.x, roadPointd.y-roadPointf.y);
+    // 小车向量以及下一个路径点与车头的向量
+    double carLength = sqrt(pow(double(carVector.x),2)+pow(double(carVector.y),2)),
+    roadLength = sqrt(pow(double(roadVector.x),2)+pow(double(roadVector.y),2)),
+    sinAngle = (carVector.x * roadVector.y -carVector.y * roadVector.x) /(carLength * roadLength);
+    // 向量叉乘
+    return (asin(sinAngle) * 180 / 3.14);
+}
+
+void adjust(int cross){
+     if (abs(cross) < 10) {goAhead();//cvWaitKey(80); stop();
+							std::cout << "Go ahead!" << std::endl;
+							fpath << "Go ahead!" << std::endl;
+	 }
+    else if (cross< 0) {turnLeft();cvWaitKey(250);  stop();
+						std::cout << "Turn left!" << std::endl;
+	fpath << "Turn left!" << std::endl;}
+        else {
+			if (((corners[lastPoint].x > 350) )) cvWaitKey(60);
+			turnRight();
+		       stop();
+				std::cout << "Turn Right!" << std::endl;
+		fpath << "Turn Right!" << std::endl;}
+}
+
+void solveMaze(std::ofstream &fout){
+	std::cout << 2 << std::endl;
+    //IplImage *img, *destimage1;
+    //IplImage* finalimage;
+    //IplImage* finalnalimage1;
+
+    capture = cvCreateCameraCapture(0);
+    img = cvQueryFrame(capture);
+    destimage1 = cvQueryFrame(capture);
+    finalimage = cvQueryFrame(capture);
+    destimage1 = cvCreateImage(cvGetSize(destimage1), 8, 3);
+    finalimage = cvCreateImage(cvGetSize(destimage1), 8, 1);
+	IplImage *_median = cvCreateImage(cvGetSize(destimage1), IPL_DEPTH_8U, 1);  
+    finalnalimage1 = cvCreateImage(cvGetSize(destimage1), 8, 1);
+
+    cvGetPerspectiveTransform(originpoints, newpoints, transmat);
+    cvWarpPerspective(img, destimage1, transmat);
+    cvShowImage("win2", destimage1);
+    cvInRangeS(destimage1,cvScalar(color0,color0,color0), cvScalar(color1,color1,color1), finalimage);
+
+	//g_pGrayImage1 = cvCreateImage(cvGetSize(destimage1), IPL_DEPTH_8U, 1); 
+	//cvCvtColor(destimage1, g_pGrayImage1, CV_BGR2GRAY); 
+	//on_trackbar(color0,color1,g_pGrayImage1,finalimage);  //二值化
+    cvSmooth(finalimage,_median, CV_MEDIAN);
+	cvNamedWindow("二值化");
+	cvNamedWindow("高斯光滑");
+	cvShowImage("win3", finalimage);
+	cvShowImage("高斯光滑", _median);
+    cvThin(_median, finalnalimage1, thintimes);
+
+	CvSeq* lines = cvHoughLines2(finalnalimage1, storage, CV_HOUGH_PROBABILISTIC, 1, CV_PI/180, 30, 40, 40); //Hough变换找直线
+
+		cvSetZero(img1); //填充为黑色
+   for(int i = 0; i < lines->total; i++)
+  {
+CvPoint* line = (CvPoint*) cvGetSeqElem(lines, i); //读取第i条线段的两个端点
+cvLine( img1, line[0], line[1], cvScalar(255)); //用白色画出这条线段
+//std::cout<<"line:"<<line[0]<<' '<< line[1]<<std::endl;
+}
+    //cvShowImage("win6", img1);
+    //cvNamedWindow("win3");
+	//cvNamedWindow("win6");
+    //cvShowImage("win3", finalnalimage1);
+    if(cvWaitKey(10) >= 0) return;
+    RgbImage maze(img1);
+    //cvNamedWindow("win4");
+    //cvShowImage("win4", maze.imgp);
+//????????????????????????????????????????????????????????
+	fout << maze.imgp ->height << ' ' << maze.imgp->width << std::endl;
+    for(int i = 0; i < img -> height; ++i){
+        for(int j = 0; j < img -> width; ++j)
+            fout << (unsigned(finalimage->imageData[i * img -> width + j]) > 120) << ' ';
+		fout << std::endl;
+    }
+}
+
+void cvThin (IplImage* src, IplImage* dst, int iterations){
+    cvCopyImage(src, dst);
+    BwImage dstdat(dst);
+    IplImage* t_image = cvCloneImage(src);
+    BwImage t_dat(t_image);
+    for (int n = 0; n < iterations; n++)
+    for (int s = 0; s <= 1; s++){
+        cvCopyImage(dst, t_image);
+        for (int i = 0; i < src->height; i++)
+        for (int j = 0; j < src->width; j++)
+        if (t_dat[i][j]){
+            int a = 0, b = 0;
+            int d[8][2] = {{-1, 0}, {-1, 1}, {0, 1}, {1, 1},{1, 0}, {1, -1}, {0, -1}, {-1, -1}};
+            int p[8];
+            p[0] = (i == 0) ? 0 : t_dat[i-1][j];
+            for (int k = 1; k <= 8; k++){
+                if (i+d[k%8][0] < 0 || i+d[k%8][0] >= src->height
+                    || j+d[k%8][1] < 0 || j+d[k%8][1] >= src->width)
+                p[k%8] = 0;
+                else p[k%8] = t_dat[ i+d[k%8][0] ][ j+d[k%8][1] ];
+                if (p[k%8]){
+                    b++;
+                    if (!p[k-1]) a++;
+                }
+            }
+            if (b >= 2 && b <= 6 && a == 1)
+                if (!s && !(p[2] && p[4] && (p[0] || p[6])))
+                dstdat[i][j] = 0;
+            else if (s && !(p[0] && p[6] && (p[2] || p[4])))
+                dstdat[i][j] = 0;
+        }
+    }
+    cvReleaseImage(&t_image);
+}
+
+
+void goAhead(){	
+	char ch[20] = "1";
+	PurgeComm(hand1, PURGE_RXCLEAR);
+    WriteFile(hand1,ch,sizeof(bTemp),&bytewrite,NULL);
+	std::cout<<"go ahead"<<std::endl;
+}
+
+void turnLeft(){
+	char ch[10] = "2";
+	PurgeComm(hand1, PURGE_RXCLEAR);
+    WriteFile(hand1,ch,sizeof(bTemp),&bytewrite,NULL);
+	std::cout<<"turn left"<<std::endl;
+}
+void turnRight(){
+	char ch[10] = "3";
+	PurgeComm(hand1, PURGE_RXCLEAR);
+    WriteFile(hand1,ch,sizeof(bTemp),&bytewrite,NULL);
+	std::cout<<"turn right"<<std::endl;
+}
+
+void goBack(){
+	char ch[10] = "4";
+	PurgeComm(hand1, PURGE_RXCLEAR);
+    WriteFile(hand1,ch,sizeof(bTemp),&bytewrite,NULL);
+	std::cout<<"go back"<<std::endl;
+}
+void stop(){
+	char ch[10] = "5";
+	PurgeComm(hand1, PURGE_RXCLEAR);
+	WriteFile(hand1,ch,sizeof(bTemp),&bytewrite,NULL);
+	std::cout<<"stop now"<<std::endl;
+}
+
+
+void mouse0(int mouseevent, int x, int y, int flags, void* param){
+    if(mouseevent == CV_EVENT_LBUTTONUP && cnt < 4){
+        px[cnt]=x; py[cnt] = y; //记录当前位置
+         std::cout<<"("<<px[cnt]<<","<<py[cnt]<<")"<<std::endl;
+
+		originpoints[cnt] = cvPoint2D32f(px[cnt],py[cnt]);
+		++cnt;
+    }
+}
+
+void mouse1(int mouseevent, int x, int y, int flags, void* param){
+    if(mouseevent == CV_EVENT_LBUTTONUP && count < 9){
+        std::cout<<"拐点为：("<<x<<","<<y<<")"<<std::endl;
+		++count;
+    }
+
+}
